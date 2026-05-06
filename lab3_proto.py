@@ -1,5 +1,5 @@
 import os
-from lab1_proto import mfcc
+from lab1_proto import mfcc, mspec
 from lab2_proto import viterbi, concatHMMs
 from lab2_tools import log_multivariate_normal_density_diag
 import numpy as np
@@ -9,6 +9,7 @@ from tqdm import tqdm
 import random
 from sklearn.preprocessing import StandardScaler
 import torch.nn.functional as F
+import torch
 
 def words2phones(wordList, pronDict, addSilence=True, addShortPause=True):
     """ word2phones: converts word level to phone level transcription adding silence
@@ -118,9 +119,9 @@ viterbiStateTrans = forcedAlignment(lmfcc, phoneHMMs, phoneTrans)
 frames2trans(viterbiStateTrans, outfilename='z43a.lab')
 
 # 4.3 FEATURE EXTRACTION
-
-# Train data:
 """
+# Train data:
+
 # Progress bar:
 total = sum(len([f for f in files if f.endswith('.wav')]) 
             for _, _, files in os.walk('tidigits/disc_4.1.1/tidigits/train'))
@@ -134,6 +135,7 @@ for root, dirs, files in os.walk('tidigits/disc_4.1.1/tidigits/train'):
       if file.endswith('.wav'):
          filename = os.path.join(root, file)
          samples, samplingrate = loadAudio(filename)
+         mspec_feat = mspec(samples)
          lmfcc = mfcc(samples) 
          wordTrans = list(path2info(filename)[2])  # Obtain word level transcription  
          phoneTrans = words2phones(wordTrans, prondict) # Obtain phone level transcription given words in file + phonetic dictionari
@@ -142,15 +144,15 @@ for root, dirs, files in os.walk('tidigits/disc_4.1.1/tidigits/train'):
 
          # Convert viterbi path to unique state names in stateList:
          #targets = [stateList.index(stateTrans[i]) for i in viterbi_path] 
-         traindata.append({'filename': filename, 'lmfcc': lmfcc,'mspec': 'mspec', 'targets': targets})
+         traindata.append({'filename': filename, 'lmfcc': lmfcc,'mspec': mspec_feat, 'targets': targets})
          pbar.update(1) # Progress bar
 
 pbar.close() # Close progress bar 
 np.savez('traindata.npz', traindata=traindata)
-"""
+
 
 # Test data:
-"""
+
 # Progress bar:
 total = sum(len([f for f in files if f.endswith('.wav')]) 
             for _, _, files in os.walk('tidigits/disc_4.2.1/tidigits/test'))
@@ -165,6 +167,7 @@ for root, dirs, files in os.walk('tidigits/disc_4.2.1/tidigits/test'):
          filename = os.path.join(root, file)
          samples, samplingrate = loadAudio(filename)
          lmfcc = mfcc(samples) 
+         mspec_feat = mspec(samples)
          wordTrans = list(path2info(filename)[2])  # Obtain word level transcription  
          phoneTrans = words2phones(wordTrans, prondict) # Obtain phone level transcription given words in file + phonetic dictionari
          
@@ -172,7 +175,7 @@ for root, dirs, files in os.walk('tidigits/disc_4.2.1/tidigits/test'):
 
          # Convert viterbi path to unique state names in stateList:
          #targets = [stateList.index(stateTrans[i]) for i in viterbi_path] 
-         testdata.append({'filename': filename, 'lmfcc': lmfcc,'mspec': 'mspec', 'targets': targets})
+         testdata.append({'filename': filename, 'lmfcc': lmfcc,'mspec': mspec_feat, 'targets': targets})
          pbar.update(1) # Progress bar
 
 pbar.close() # Close progress bar 
@@ -181,7 +184,49 @@ np.savez('testdata.npz', testdata=testdata)
 
 # 4.4 Training and Validation Sets
 
+def train_val_sets(data):
+   speaker_dict = {}
+   for utterance in data:
+
+      gender, speaker, digits, repetition = path2info(utterance['filename'])
+      if speaker not in speaker_dict:
+         speaker_dict[speaker] = {'gender': gender, 'utterances': [utterance]}
+      else:
+         speaker_dict[speaker]['utterances'].append(utterance)   # Save utterances of same speaker together
+
+
+   # Divide by gender
+   male = [s for s in speaker_dict if speaker_dict[s]['gender'] == 'man']  # Keep only male speakers
+   female = [s for s in speaker_dict if speaker_dict[s]['gender'] == 'woman'] # Keep only female speakers
+
+   # Speakers might be in order, shuffle to remove bias:
+   random.shuffle(male) 
+   random.shuffle(female)
+
+   # Split male and female datasets:
+   cut_male = int(0.9 * len(male))
+   male_train = male[:cut_male]
+   male_val = male[cut_male:]
+
+   cut_fem = int(0.9 * len(female))
+   female_train = female[:cut_fem]
+   female_val = female[cut_fem:]
+
+   train_set = male_train + female_train
+   val_set = male_val + female_val
+
+   # Return datasets
+   train_data = []
+   for speaker in train_set:
+      train_data += speaker_dict[speaker]['utterances']
+   val_data = []
+   for speaker in val_set:
+      val_data += speaker_dict[speaker]['utterances']
+
+   return train_set, val_set, train_data, val_data
+
 data = np.load('traindata.npz', allow_pickle=True)['traindata']
+"""
 speaker_dict = {}
 
 for utterance in data:
@@ -212,9 +257,12 @@ female_val = female[cut_fem:]
 
 train_set = male_train + female_train
 val_set = male_val + female_val
+"""
 
-print(f"\nTrain set size: {len(train_set)}. Women: {len(female_train)}. Men: {len(male_train)}.")
-print(f"Val set size: {len(val_set)}. Women: {len(female_val)}. Men: {len(male_val)}")
+train_set, val_set, train_data, val_data = train_val_sets(data)
+
+print(f"\nTrain set size: {len(train_set)}.") # Women: {len(female_train)}. Men: {len(male_train)}.")
+print(f"Val set size: {len(val_set)}.") #Women: {len(female_val)}. Men: {len(male_val)}")
 
 # 4.5. Acoustic Context (Dynamic Features)
 
@@ -229,6 +277,78 @@ print(f"Val set size: {len(val_set)}. Women: {len(female_val)}. Men: {len(male_v
 testdata = np.load('testdata.npz', allow_pickle=True)['testdata']
 
 # Collect al coefficients for training data
+
+def flatten_data(data, feature='lmfcc'):
+   features = []
+   targets = []
+   for utterance in data:
+      if feature == 'lmfcc':
+         features.append(utterance['lmfcc'])     # (T, D)
+      elif feature == 'mspec':
+         features.append(utterance['mspec'])
+      else:
+         print("\nIncorrect feature type.")
+      targets.append(utterance['targets'])   # (T,)
+
+   # Concatenate  --> TODO: explain on notes
+   X = np.vstack(features)      # (N, D)
+   y = np.concatenate(targets) # (N,)
+
+   return X, y
+
+def feature_standarization(training_set, val_set, test_set, stateList, feature='lmfcc'):
+   if feature == 'lmfcc':
+      X_train, y_train = flatten_data(training_set)
+      X_val, y_val = flatten_data(val_set)
+      X_test, y_test = flatten_data(test_set)
+   elif feature == 'mspec':
+      X_train, y_train = flatten_data(training_set, feature='mspec')
+      X_val, y_val = flatten_data(val_set, feature='mspec')
+      X_test, y_test = flatten_data(test_set, feature='mspec')
+   else:
+      print("\nIncorrect feature type.")
+      return
+
+   # Normalization coefficients
+   scaler = StandardScaler()
+   scaler.fit(X_train)
+
+   # Normalization:
+
+   X_train = scaler.transform(X_train)
+   X_val   = scaler.transform(X_val)
+   X_test  = scaler.transform(X_test)
+
+   print("TRAIN:", X_train.shape, y_train.shape)
+   print("VAL:  ", X_val.shape,   y_val.shape)
+   print("TEST: ", X_test.shape,  y_test.shape)
+
+   # Convert feature arrays to 32 bits floating point
+   X_train = X_train.astype('float32') # lmfcc_train_x
+   X_val = X_val.astype('float32')
+   X_test = X_test.astype('float32')
+
+   # Convert target arrays into a one-hot encoding:
+   output_dim = len(stateList)
+   state_to_idx = {state: i for i, state in enumerate(stateList)}
+   y_train = np.array([state_to_idx[s] for s in y_train])
+   y_val   = np.array([state_to_idx[s] for s in y_val])
+   y_test  = np.array([state_to_idx[s] for s in y_test])
+
+   y_train = F.one_hot(torch.tensor(y_train),num_classes=output_dim).float()  # Change if necessary TODO
+   y_val = F.one_hot(torch.tensor(y_val),num_classes=output_dim).float()
+   y_test = F.one_hot(torch.tensor(y_test),num_classes=output_dim).float()
+
+   return X_train, X_val, X_test, y_train, y_val, y_test
+
+print("\nLMFCC:")
+X_train, X_val, X_test, y_train, y_val, y_test = feature_standarization(train_data, val_data, testdata, stateList, feature='lmfcc')
+print("\nFilterbank:")
+X_train_mspec, X_val_mspec, X_test_mspec, y_train_mspec, y_val_mspec, y_test_mspec = feature_standarization(train_data, val_data, testdata, stateList, feature='mspec')
+
+"""
+
+
 train_features = []
 train_targets = []
 
@@ -265,6 +385,7 @@ X_test = np.vstack(test_features)
 y_test = np.concatenate(test_targets)
 
 
+
 # Normalization coefficients
 
 scaler = StandardScaler()
@@ -288,8 +409,15 @@ X_test = X_test.astype('float32')
 
 # Convert target arrays into a one-hot encoding:
 output_dim = len(stateList)
+state_to_idx = {state: i for i, state in enumerate(stateList)}
+y_train = np.array([state_to_idx[s] for s in y_train])
+y_val   = np.array([state_to_idx[s] for s in y_val])
+y_test  = np.array([state_to_idx[s] for s in y_test])
+
 y_train = F.one_hot(torch.tensor(y_train),num_classes=output_dim)
 y_val = F.one_hot(torch.tensor(y_val),num_classes=output_dim)
 y_test = F.one_hot(torch.tensor(y_test),num_classes=output_dim)
-
+"""
 ## 5. Phoneme Recognition with Deep Neural Networks
+
+#print(output_dim)
