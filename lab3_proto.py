@@ -26,9 +26,9 @@ def words2phones(wordList, pronDict, addSilence=True, addShortPause=True):
     if addSilence:
        phoneList.append('sil')
 
-    for word in wordList:
+    for i, word in enumerate(wordList):
        phoneList.extend(pronDict[word])
-       if addShortPause:
+       if addShortPause and i < len(wordList) - 1:
           phoneList.append('sp')
     if addSilence:
        phoneList.append('sil')
@@ -82,7 +82,6 @@ def stackfeatures(n, features):
                 idx = 2*T - idx - 2
 
             stacked[i] = features[idx]
-
     return stacked
 
 
@@ -196,12 +195,13 @@ def train_val_sets(data):
 
 
    # Divide by gender
-   male = [s for s in speaker_dict if speaker_dict[s]['gender'] == 'man']  # Keep only male speakers
-   female = [s for s in speaker_dict if speaker_dict[s]['gender'] == 'woman'] # Keep only female speakers
+   male = sorted(s for s in speaker_dict if speaker_dict[s]['gender'] == 'man')  # Keep only male speakers
+   female = sorted(s for s in speaker_dict if speaker_dict[s]['gender'] == 'woman') # Keep only female speakers
 
    # Speakers might be in order, shuffle to remove bias:
-   random.shuffle(male) 
-   random.shuffle(female)
+   rng = np.random.RandomState(42) # seed
+   rng.shuffle(male) 
+   rng.shuffle(female)
 
    # Split male and female datasets:
    cut_male = int(0.9 * len(male))
@@ -278,14 +278,33 @@ testdata = np.load('testdata.npz', allow_pickle=True)['testdata']
 
 # Collect al coefficients for training data
 
-def flatten_data(data, feature='lmfcc'):
+def flatten_data(data, feature='lmfcc',dynamic_f=False):
    features = []
    targets = []
    for utterance in data:
       if feature == 'lmfcc':
-         features.append(utterance['lmfcc'])     # (T, D)
+        if dynamic_f:
+            feat = []
+            T = len(utterance['lmfcc'])
+            for t in range(T):
+                stacked = stackfeatures(t, utterance['lmfcc']).reshape(-1)  # (7*13,)
+                feat.append(stacked)
+            feat = np.vstack(feat)   # (T, 7*13)
+        else:
+            feat = utterance['lmfcc']
+    
+        features.append(feat)     # (T, D)
       elif feature == 'mspec':
-         features.append(utterance['mspec'])
+        if dynamic_f:
+            feat = []
+            T = len(utterance['mspec'])
+            for t in range(T):
+                stacked = stackfeatures(t, utterance['mspec']).reshape(-1)  # (7*13,)
+                feat.append(stacked)
+            feat = np.vstack(feat)   # (T, 7*13)
+        else:
+            feat = utterance['mspec']
+        features.append(feat)     # (T, D)
       else:
          print("\nIncorrect feature type.")
       targets.append(utterance['targets'])   # (T,)
@@ -296,15 +315,15 @@ def flatten_data(data, feature='lmfcc'):
 
    return X, y
 
-def feature_standarization(training_set, val_set, test_set, stateList, feature='lmfcc'):
+def feature_standarization(training_set, val_set, test_set, stateList, feature='lmfcc',dynamic_f=False):
    if feature == 'lmfcc':
-      X_train, y_train = flatten_data(training_set)
-      X_val, y_val = flatten_data(val_set)
-      X_test, y_test = flatten_data(test_set)
+      X_train, y_train = flatten_data(training_set,dynamic_f=dynamic_f)
+      X_val, y_val = flatten_data(val_set,dynamic_f=dynamic_f)
+      X_test, y_test = flatten_data(test_set,dynamic_f=dynamic_f)
    elif feature == 'mspec':
-      X_train, y_train = flatten_data(training_set, feature='mspec')
-      X_val, y_val = flatten_data(val_set, feature='mspec')
-      X_test, y_test = flatten_data(test_set, feature='mspec')
+      X_train, y_train = flatten_data(training_set, feature='mspec',dynamic_f=dynamic_f)
+      X_val, y_val = flatten_data(val_set, feature='mspec',dynamic_f=dynamic_f)
+      X_test, y_test = flatten_data(test_set, feature='mspec',dynamic_f=dynamic_f)
    else:
       print("\nIncorrect feature type.")
       return
@@ -339,12 +358,12 @@ def feature_standarization(training_set, val_set, test_set, stateList, feature='
    y_val = F.one_hot(torch.tensor(y_val),num_classes=output_dim).float()
    y_test = F.one_hot(torch.tensor(y_test),num_classes=output_dim).float()
 
-   return X_train, X_val, X_test, y_train, y_val, y_test
+   return X_train, X_val, X_test, y_train, y_val, y_test, state_to_idx
 
 print("\nLMFCC:")
-X_train, X_val, X_test, y_train, y_val, y_test = feature_standarization(train_data, val_data, testdata, stateList, feature='lmfcc')
+X_train, X_val, X_test, y_train, y_val, y_test, state_to_idx = feature_standarization(train_data, val_data, testdata, stateList, feature='lmfcc')
 print("\nFilterbank:")
-X_train_mspec, X_val_mspec, X_test_mspec, y_train_mspec, y_val_mspec, y_test_mspec = feature_standarization(train_data, val_data, testdata, stateList, feature='mspec')
+X_train_mspec, X_val_mspec, X_test_mspec, y_train_mspec, y_val_mspec, y_test_mspec, state_to_idx = feature_standarization(train_data, val_data, testdata, stateList, feature='mspec')
 
 """
 
